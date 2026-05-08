@@ -24,6 +24,15 @@
 
 ---
 
+## 추론 결과 예시
+
+![inference result](assets/inference_result.jpg)
+
+> 초록 마스크(`normal`) / 보라 마스크(`heat`) 로 발정 소를 인스턴스 단위로 구분.  
+> confidence score와 함께 bounding box + segmentation mask 동시 출력.
+
+---
+
 ## 문제 정의
 
 축사 CCTV 영상에서 소의 발정 상태를 사람이 육안으로 모니터링하는 방식은 비효율적이고 누락이 잦습니다.  
@@ -54,32 +63,68 @@ CODE/
 └── to_submission.ipynb        # 예측 결과 → 제출 포맷 변환
 ```
 
-### 2. 모델 선정
+### 2. 이미지 전처리 실험
+
+성능 개선을 기대하며 다양한 전처리 조합을 실험했으나, **유의미한 성능 향상은 없었습니다.**
+
+| 전처리 방법 | 결과 |
+|------------|------|
+| 흑백(Grayscale) 변환 | 성능 향상 없음 |
+| 채도(Saturation) 채널 분리 | 성능 향상 없음 |
+| 원본 RGB | **최종 채택** |
+
+> 축사 CCTV 특성상 조명·환경이 일정하여 색상 전처리의 효과가 제한적이었습니다.  
+> 이후 전처리보다 **모델 선택**에 집중하는 전략으로 전환했습니다.
+
+### 3. 모델 선정
 
 `papers-with-code` 기준 object detection / instance segmentation SOTA를 조사하여  
 **Swin Transformer Object Detection** 채택.
 
-| 모델 | 비고 |
-|------|------|
-| YOLOv5 | 초기 실험 |
-| Mask R-CNN | 비교 실험 |
-| **Swin Transformer** | **최종 채택** — Weighted mAP **0.97434** |
+| 모델 | Weighted mAP | 비고 |
+|------|-------------|------|
+| YOLOv5 | - | 초기 실험 |
+| Mask R-CNN | - | 비교 실험 |
+| **Swin Transformer** | **0.97434** | **최종 채택** |
 
 - Paper: [Swin Transformer: Hierarchical Vision Transformer using Shifted Windows](https://arxiv.org/pdf/2103.14030.pdf)
 - Code Base: [SwinTransformer/Swin-Transformer-Object-Detection](https://github.com/SwinTransformer/Swin-Transformer-Object-Detection)
 - Framework: [mmdetection](https://github.com/open-mmlab/mmdetection)
 
-### 3. 이미지 전처리 실험
+---
 
-다양한 전처리 조합을 실험하여 최적 입력 표현 탐색:
+## Swin Transformer
 
-- 흑백(Grayscale) 변환
-- 채도(Saturation) 채널 분리
-- 원본 RGB 비교
+![swin architecture](assets/swin_architecture.png)
 
-### 4. 후처리 — 제출 포맷 변환
+Swin Transformer는 Vision Transformer(ViT)의 한계였던 **고해상도 이미지 처리 비용 문제**를 해결한 계층형 비전 트랜스포머입니다.
 
-모델 출력(RLE mask) → polygon segmentation 변환 후 대회 제출 포맷으로 저장.
+### 핵심 아이디어: Shifted Window Self-Attention
+
+기존 ViT는 전체 이미지를 하나의 시퀀스로 처리해 연산량이 이미지 크기의 제곱에 비례했습니다.  
+Swin Transformer는 **로컬 윈도우(Local Window)** 내에서만 self-attention을 수행하고,  
+레이어마다 윈도우를 이동(Shift)시켜 인접 윈도우 간 정보 교환을 가능하게 합니다.
+
+| 구분 | ViT | Swin Transformer |
+|------|-----|-----------------|
+| Attention 범위 | 전체 이미지 | 로컬 윈도우 |
+| 연산 복잡도 | O(n²) | O(n) |
+| 다중 스케일 피처 | ✗ | ✅ (FPN 대체 가능) |
+| 객체 탐지 적합성 | 낮음 | **높음** |
+
+### 계층형 구조 (Hierarchical Feature Maps)
+
+4개의 Stage를 거치며 feature map 해상도를 점진적으로 줄이고 채널을 늘립니다:
+
+```
+입력 (H×W×3)
+  → Stage 1: H/4  × W/4  × 48C   (Swin Block ×2)
+  → Stage 2: H/8  × W/8  × 96C   (Swin Block ×2)
+  → Stage 3: H/16 × W/16 × 192C  (Swin Block ×6)
+  → Stage 4: H/32 × W/32 × 384C  (Swin Block ×2)
+```
+
+이 다중 스케일 피처맵이 객체 탐지·세그멘테이션에 특히 강점을 가집니다.
 
 ---
 
@@ -96,25 +141,16 @@ mmcv    : 1.4.0
 ### 설치
 
 ```bash
-# 가상환경 생성
-python -m venv venv
-source venv/bin/activate
+python -m venv venv && source venv/bin/activate
 
-# PyTorch 설치
 pip install torch==1.7.0+cu110 torchvision==0.8.1+cu110 torchaudio==0.7.0 \
     -f https://download.pytorch.org/whl/torch_stable.html
 
-# mmcv 설치
 pip install mmcv-full==1.4.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu110/torch1.7.0/index.html
 
-# mmdetection 설치
-cd [코드디렉토리]
-pip install -v -e .
-
-# apex 설치
-cd [코드디렉토리]/apex
-pip install -v --disable-pip-version-check --no-cache-dir ./
+cd [코드디렉토리] && pip install -v -e .
+cd [코드디렉토리]/apex && pip install -v --disable-pip-version-check --no-cache-dir ./
 ```
 
 ---
@@ -145,7 +181,7 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 | 지표 | 점수 |
 |------|------|
 | Weighted mAP | **0.97434** |
-| 최종 순위 | **2위** (우수상) |
+| 최종 순위 | **2위 (우수상)** |
 
 이 연구는 **KSC 2023 학술발표**로 이어졌습니다.
 
@@ -154,4 +190,3 @@ CUDA_VISIBLE_DEVICES=0 python tools/test.py \
 ## 비고
 
 - 코드는 대회 규정 및 데이터 보안상 비공개입니다.
-- 방법론 및 결과는 `졸림_코드설명.docx` 기준으로 작성되었습니다.
